@@ -1,7 +1,112 @@
-include:
-  - ./docker-compose.infra.yaml
-
+version: "3"
 services:
+  pezzo-clickhouse-migrate:
+    image: ghcr.io/pezzolabs/pezzo/server:latest
+    build:
+      context: .
+      dockerfile: ./apps/server/Dockerfile
+    entrypoint: /bin/sh
+    working_dir: /app/clickhouse
+    command: -c "./migrate.sh"
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: default
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  pezzo-prisma-migrate:
+    image: ghcr.io/pezzolabs/pezzo/server:latest
+    build:
+      context: .
+      dockerfile: ./apps/server/Dockerfile
+    entrypoint: /bin/sh
+    command: -c "npx prisma migrate deploy"
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/pezzo
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23-alpine
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: default
+    volumes:
+      - ./volumes/clickhouse/data:/var/lib/clickhouse
+      - ./volumes/clickhouse/logs:/var/log/clickhouse-server
+      - ./clickhouse/config/users.d/config.xml:/etc/clickhouse-server/users.d/config.xml
+      - ./clickhouse/config/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+      - "9004:9004"
+    healthcheck:
+      test: ["CMD-SHELL", 'clickhouse-client --query "SELECT 1"']
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:15-alpine3.17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  supertokens:
+    image: supertokens/supertokens-postgresql:5.0
+    ports:
+      - "3567:3567"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_CONNECTION_URI: postgres://postgres:postgres@postgres:5432/supertokens
+    healthcheck:
+      test: >
+        bash -c 'exec 3<>/dev/tcp/127.0.0.1/3567 && echo -e "GET /hello HTTP/1.1\r\nhost: 127.0.0.1:3567\r\nConnection: close\r\n\r\n" >&3 && cat <&3 | grep "Hello"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-stack-server:
+    image: redis/redis-stack-server:7.2.0-v0
+    container_name: redis-stack-server
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+
+  local-kms:
+    image: nsmithuk/local-kms:latest
+    container_name: local-kms
+    entrypoint: "/bin/sh"
+    # Seeding the local-kms with a master key. "/init/seed.yaml" will be created based on the base64 encoded string below.
+    command: '-c "echo \"S2V5czoKICBTeW1tZXRyaWM6CiAgICBBZXM6CiAgICAgIC0gTWV0YWRhdGE6CiAgICAgICAgICBLZXlJZDogZGVtby1tYXN0ZXIta2V5CiAgICAgICAgQmFja2luZ0tleXM6CiAgICAgICAgICAtIDVjZGFlYWQyN2ZlN2RhMmRlNDc5NDVkNzNjZDZkNzllMzY0OTRlNzM4MDJmM2NkMzg2OWYxZDJjYjBiNWQ3YTkKCkFsaWFzZXM6CiAgLSBBbGlhc05hbWU6IGFsaWFzL3Rlc3RpbmcKICAgIFRhcmdldEtleUlkOiBkZW1vLW1hc3Rlci1rZXk=\" | base64 -d >> /init/seed.yaml && local-kms"'
+    ports:
+      - "9981:9981"
+    expose:
+      - "9981"
+    environment:
+      - "PORT=9981"
+      - "KMS_REGION=us-east-1"
+
+
   pezzo-server:
     image: ghcr.io/pezzolabs/pezzo/server:latest
     build:
@@ -69,3 +174,6 @@ services:
     depends_on:
       pezzo-server:
         condition: service_healthy
+
+volumes:
+  postgres_data: ~
